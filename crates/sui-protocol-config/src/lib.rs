@@ -231,6 +231,9 @@ struct FeatureFlags {
     // regardless of their previous state in the store.
     #[serde(skip_serializing_if = "is_false")]
     simplified_unwrap_then_delete: bool,
+
+    #[serde(skip_serializing_if = "is_false")]
+    shared_object_deletion: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -793,6 +796,10 @@ impl ProtocolConfig {
     pub fn simplified_unwrap_then_delete(&self) -> bool {
         self.feature_flags.simplified_unwrap_then_delete
     }
+
+    pub fn shared_object_deletion(&self) -> bool {
+        self.feature_flags.shared_object_deletion
+    }
 }
 
 #[cfg(not(msim))]
@@ -1324,10 +1331,14 @@ impl ProtocolConfig {
     pub fn set_max_tx_gas_for_testing(&mut self, max_tx_gas: u64) {
         self.max_tx_gas = Some(max_tx_gas)
     }
+
     pub fn set_execution_version_for_testing(&mut self, version: u64) {
         self.execution_version = Some(version)
     }
 
+    pub fn set_shared_object_deletion(&mut self) {
+        self.feature_flags.shared_object_deletion = true
+    }
     #[cfg(msim)]
     pub fn set_simplified_unwrap_then_delete(&mut self, val: bool) {
         self.feature_flags.simplified_unwrap_then_delete = val
