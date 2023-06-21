@@ -385,8 +385,7 @@ fn tx_handle_non_execution<Mode: ExecutionMode>(
         if !gas_status.is_unmetered() {
             temporary_store.charge_gas_legacy(gas_object_ref.0, &mut gas_status, result, gas);
         }
-        let cost_summary = gas_status.summary();
-        cost_summary
+        gas_status.summary()
     }
 }
 

@@ -490,6 +490,21 @@ impl ObjectRuntimeState {
                 Op::Delete if external_transfers.contains(&child) => {}
                 // otherwise it must have been wrapped
                 Op::Delete => {
+                    if let Some(owner) = self.input_objects.get(&child) {
+                        if owner.is_shared() {
+                            return Err(ExecutionError::new(
+                                ExecutionErrorKind::SharedObjectOperationNotAllowed,
+                                Some(
+                                    format!(
+                                        "Internal invariant violation: Wrapping shared object {}",
+                                        child
+                                    )
+                                    .into(),
+                                ),
+                            ));
+                        }
+                    }
+
                     wrapped_children.insert(child);
                 }
             }

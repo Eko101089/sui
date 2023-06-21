@@ -1,13 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    sync::Arc,
-};
-
 use crate::adapter::{missing_unwrapped_msg, new_native_extensions};
 use crate::error::convert_vm_error;
+
 use move_binary_format::{
     errors::{Location, VMError, VMResult},
     file_format::{CodeOffset, FunctionDefinitionIndex, TypeParameterIndex},
@@ -23,6 +19,10 @@ use move_vm_runtime::{move_vm::MoveVM, session::Session};
 #[cfg(debug_assertions)]
 use move_vm_types::gas::GasMeter;
 use move_vm_types::loaded_data::runtime_types::Type;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 use sui_move_natives::object_runtime::{
     self, get_all_uids, max_event_error, ObjectRuntime, RuntimeResults,
 };
@@ -329,7 +329,7 @@ impl<'vm, 'state, 'a> ExecutionContext<'vm, 'state, 'a> {
     /// Get the argument value. Cloning the value if it is copyable, and setting its value to None
     /// if it is not (making it unavailable).
     /// Errors if out of bounds, if the argument is borrowed, if it is unavailable (already taken),
-    /// or if it is an object that cannot be taken by value (shared or immutable)
+    /// or if it is an object that cannot be taken by value (immutable)
     pub fn by_value_arg<V: TryFromValue>(
         &mut self,
         command_kind: CommandKind<'_>,
