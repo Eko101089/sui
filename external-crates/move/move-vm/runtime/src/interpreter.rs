@@ -22,7 +22,8 @@ use move_vm_config::runtime::VMRuntimeLimitsConfig;
 #[cfg(debug_assertions)]
 use move_vm_profiler::GasProfiler;
 use move_vm_profiler::{
-    profile_close_frame, profile_close_instr, profile_open_frame, profile_open_instr,
+    profile_close_frame, profile_close_frame_impl, profile_close_instr, profile_open_frame,
+    profile_open_frame_impl, profile_open_instr,
 };
 use move_vm_types::{
     data_store::DataStore,
@@ -102,6 +103,116 @@ impl Interpreter {
     pub fn runtime_limits_config(&self) -> &VMRuntimeLimitsConfig {
         &self.runtime_limits_config
     }
+
+    pub fn pre_hook_fn(
+        gas_meter: &mut impl GasMeter,
+        function: &Arc<Function>,
+        ty_args: &[Type],
+        data_store: &impl DataStore,
+        loader: &Loader,
+        interpreter: &mut Interpreter,
+        exit_code: Option<&ExitCode>,
+    ) -> VMResult<()> {
+        profile_open_frame!(gas_meter, function.pretty_string());
+
+        if interpreter.paranoid_type_checks {
+            // which scenario
+            if function.is_native() {
+                let link_context = data_store.link_context();
+                let resolver = function.get_resolver(link_context, loader);
+
+                for ty in function.parameter_types() {
+                    let type_ = if ty_args.is_empty() {
+                        ty.clone()
+                    } else {
+                        resolver
+                            .subst(ty, &ty_args)
+                            .map_err(|e| e.finish(Location::Undefined))?
+                    };
+                    interpreter
+                        .operand_stack
+                        .push_ty(type_)
+                        .map_err(|e| e.finish(Location::Undefined))?;
+                }
+            }
+            if let Some(exit_code) = exit_code {
+                match exit_code {
+                    ExitCode::Call(_) | ExitCode::CallGeneric(_) => {
+                        self.check_friend_or_private_call(&current_frame.function, &func)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn pre_hook_instr(
+        gas_meter: &mut impl GasMeter,
+        function: &Arc<Function>,
+        instruction: &Bytecode,
+        local_tys: &[Type],
+        locals: &Locals,
+        ty_args: &[Type],
+        resolver: &Resolver,
+        interpreter: &mut Interpreter,
+    ) -> PartialVMResult<()> {
+        profile_open_instr!(gas_meter, format!("{:?}", instruction));
+
+        if interpreter.paranoid_type_checks {
+            interpreter.operand_stack.check_balance()?;
+            Frame::pre_execution_type_stack_transition(
+                local_tys,
+                locals,
+                ty_args,
+                resolver,
+                interpreter,
+                instruction,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn post_hook_fn(gas_meter: &mut impl GasMeter, function: &Arc<Function>) -> () {
+        profile_close_frame!(gas_meter, function.pretty_string());
+
+        // if call_native
+        if self.paranoid_type_checks {
+            for ty in function.return_types() {
+                self.operand_stack.push_ty(ty.subst(&ty_args)?)?;
+            }
+        }
+    }
+
+    pub fn post_hook_instr(
+        gas_meter: &mut impl GasMeter,
+        function: &Arc<Function>,
+        instruction: &Bytecode,
+        r: &InstrRet,
+        local_tys: &[Type],
+        ty_args: &[Type],
+        resolver: &Resolver,
+        interpreter: &mut Interpreter,
+    ) -> PartialVMResult<()> {
+        profile_close_instr!(gas_meter, format!("{:?}", instruction));
+
+        // only run if InstrRet::Ok
+        if let InstrRet::Ok = r {
+            if interpreter.paranoid_type_checks {
+                Frame::post_execution_type_stack_transition(
+                    local_tys,
+                    ty_args,
+                    resolver,
+                    interpreter,
+                    instruction,
+                )?;
+
+                interpreter.operand_stack.check_balance()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Entrypoint into the interpreter. All external calls need to be routed through this
     /// function.
     pub(crate) fn entrypoint(
@@ -120,7 +231,14 @@ impl Interpreter {
             runtime_limits_config: loader.vm_config().runtime_limits_config.clone(),
         };
 
-        profile_open_frame!(gas_meter, function.pretty_string());
+        Self::pre_hook_fn(
+            gas_meter,
+            &function,
+            &ty_args,
+            data_store,
+            loader,
+            &mut interpreter,
+        );
 
         if function.is_native() {
             for arg in args {
@@ -132,21 +250,14 @@ impl Interpreter {
             let link_context = data_store.link_context();
             let resolver = function.get_resolver(link_context, loader);
 
-            if interpreter.paranoid_type_checks {
-                for ty in function.parameter_types() {
-                    let type_ = if ty_args.is_empty() {
-                        ty.clone()
-                    } else {
-                        resolver
-                            .subst(ty, &ty_args)
-                            .map_err(|e| e.finish(Location::Undefined))?
-                    };
-                    interpreter
-                        .operand_stack
-                        .push_ty(type_)
-                        .map_err(|e| e.finish(Location::Undefined))?;
-                }
-            }
+            Self::pre_hook_fn(
+                gas_meter,
+                &function,
+                &ty_args,
+                data_store,
+                loader,
+                &mut interpreter,
+            );
 
             let return_values = interpreter
                 .call_native_return_values(
@@ -168,10 +279,18 @@ impl Interpreter {
                         .finish(Location::Undefined),
                 })?;
 
-            profile_close_frame!(gas_meter, function.pretty_string());
+            Self::post_hook_fn(gas_meter, &function);
 
             Ok(return_values.into_iter().collect())
         } else {
+            Self::pre_hook_fn(
+                gas_meter,
+                &function,
+                &ty_args,
+                data_store,
+                loader,
+                &mut interpreter,
+            );
             interpreter.execute_main(
                 loader, data_store, gas_meter, extensions, function, ty_args, args,
             )
@@ -229,7 +348,8 @@ impl Interpreter {
                         .charge_drop_frame(non_ref_vals.into_iter())
                         .map_err(|e| self.set_location(e))?;
 
-                    profile_close_frame!(gas_meter, current_frame.function.pretty_string());
+                    Self::post_hook_fn(gas_meter, &current_frame.function);
+
                     if let Some(frame) = self.call_stack.pop() {
                         // Note: the caller will find the callee's return values at the top of the shared operand stack
                         current_frame = frame;
@@ -243,12 +363,14 @@ impl Interpreter {
                     let func = resolver.function_from_handle(fh_idx);
                     // Compiled out in release mode
                     #[cfg(debug_assertions)]
-                    let func_name = func.pretty_string();
-                    profile_open_frame!(gas_meter, func_name.clone());
-
-                    if self.paranoid_type_checks {
-                        self.check_friend_or_private_call(&current_frame.function, &func)?;
-                    }
+                    Self::pre_hook_fn(
+                        gas_meter,
+                        &func,
+                        &current_frame.ty_args,
+                        data_store,
+                        loader,
+                        &mut self,
+                    );
 
                     // Charge gas
                     let module_id = func
@@ -280,7 +402,7 @@ impl Interpreter {
                         )?;
                         current_frame.pc += 1; // advance past the Call instruction in the caller
 
-                        profile_close_frame!(gas_meter, func_name);
+                        Self::post_hook_fn(gas_meter, &func);
                         continue;
                     }
                     let frame = self
@@ -303,12 +425,14 @@ impl Interpreter {
                     let func = resolver.function_from_instantiation(idx);
                     // Compiled out in release mode
                     #[cfg(debug_assertions)]
-                    let func_name = func.pretty_string();
-                    profile_open_frame!(gas_meter, func_name.clone());
-
-                    if self.paranoid_type_checks {
-                        self.check_friend_or_private_call(&current_frame.function, &func)?;
-                    }
+                    Self::pre_hook_fn(
+                        gas_meter,
+                        &func,
+                        &current_frame.ty_args,
+                        data_store,
+                        loader,
+                        &mut self,
+                    );
 
                     // Charge gas
                     let module_id = func
@@ -336,7 +460,7 @@ impl Interpreter {
                         )?;
                         current_frame.pc += 1; // advance past the Call instruction in the caller
 
-                        profile_close_frame!(gas_meter, func_name);
+                        Self::post_hook_fn(gas_meter, &func);
 
                         continue;
                     }
@@ -489,12 +613,6 @@ impl Interpreter {
         for value in return_values {
             self.operand_stack.push(value)?;
         }
-
-        if self.paranoid_type_checks {
-            for ty in function.return_types() {
-                self.operand_stack.push_ty(ty.subst(&ty_args)?)?;
-            }
-        }
         Ok(())
     }
 
@@ -585,14 +703,14 @@ impl Interpreter {
                     } else {
                         Err(self.set_location(PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                                 .with_message(
-                                    format!("Private/Friend function invokation error, caller: {:?}::{:?}, callee: {:?}::{:?}", caller_id, caller.name(), callee_id, callee.name()),
+                                    format!("Private/Friend function invocation error, caller: {:?}::{:?}, callee: {:?}::{:?}", caller_id, caller.name(), callee_id, callee.name()),
                                 )))
                     }
                 }
                 _ => Err(self.set_location(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!(
-                            "Private/Friend function invokation error caller: {:?}, callee {:?}",
+                            "Private/Friend function invocation error caller: {:?}, callee {:?}",
                             caller.name(),
                             callee.name()
                         )),
@@ -2350,19 +2468,16 @@ impl Frame {
                 // The reason for this design is we charge gas during instruction execution and we want to perform checks only after
                 // proper gas has been charged for each instruction.
 
-                if interpreter.paranoid_type_checks {
-                    interpreter.operand_stack.check_balance()?;
-                    Self::pre_execution_type_stack_transition(
-                        &self.local_tys,
-                        &self.locals,
-                        self.ty_args(),
-                        resolver,
-                        interpreter,
-                        instruction,
-                    )?;
-                }
-
-                profile_open_instr!(gas_meter, format!("{:?}", instruction));
+                Interpreter::pre_hook_instr(
+                    gas_meter,
+                    &self.function,
+                    instruction,
+                    &self.local_tys,
+                    &self.locals,
+                    self.ty_args(),
+                    resolver,
+                    interpreter,
+                );
 
                 let r = Self::execute_instruction(
                     &mut self.pc,
@@ -2376,7 +2491,16 @@ impl Frame {
                     instruction,
                 )?;
 
-                profile_close_instr!(gas_meter, format!("{:?}", instruction));
+                Interpreter::post_hook_instr(
+                    gas_meter,
+                    &self.function,
+                    instruction,
+                    &r,
+                    &self.local_tys,
+                    &self.ty_args,
+                    resolver,
+                    interpreter,
+                );
 
                 match r {
                     InstrRet::Ok => (),
@@ -2385,18 +2509,6 @@ impl Frame {
                     }
                     InstrRet::Branch => break,
                 };
-
-                if interpreter.paranoid_type_checks {
-                    Self::post_execution_type_stack_transition(
-                        &self.local_tys,
-                        &self.ty_args,
-                        resolver,
-                        interpreter,
-                        instruction,
-                    )?;
-
-                    interpreter.operand_stack.check_balance()?;
-                }
 
                 // invariant: advance to pc +1 is iff instruction at pc executed without aborting
                 self.pc += 1;
