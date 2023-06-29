@@ -108,16 +108,34 @@ impl Interpreter {
         profile_open_frame!(gas_meter, function.pretty_string());
     }
 
+    pub fn post_hook_fn(gas_meter: &mut impl GasMeter, function: &Arc<Function>) -> () {
+        profile_close_frame!(gas_meter, function.pretty_string());
+    }
+
     pub fn pre_hook_instr(
         gas_meter: &mut impl GasMeter,
         function: &Arc<Function>,
         instruction: &Bytecode,
-    ) -> () {
-        profile_open_instr!(gas_meter, format!("{:?}", instruction));
-    }
+        local_tys: &[Type],
+        locals: &Locals,
+        ty_args: &[Type],
+        resolver: &Resolver,
+        interpreter: &mut Interpreter,
+    ) -> PartialVMResult<()> {
+        if interpreter.paranoid_type_checks {
+            interpreter.operand_stack.check_balance()?;
+            Frame::pre_execution_type_stack_transition(
+                local_tys,
+                locals,
+                ty_args,
+                resolver,
+                interpreter,
+                instruction,
+            )?;
+        }
 
-    pub fn post_hook_fn(gas_meter: &mut impl GasMeter, function: &Arc<Function>) -> () {
-        profile_close_frame!(gas_meter, function.pretty_string());
+        profile_open_instr!(gas_meter, format!("{:?}", instruction));
+        Ok(())
     }
 
     pub fn post_hook_instr(
@@ -2399,19 +2417,16 @@ impl Frame {
                 // The reason for this design is we charge gas during instruction execution and we want to perform checks only after
                 // proper gas has been charged for each instruction.
 
-                if interpreter.paranoid_type_checks {
-                    interpreter.operand_stack.check_balance()?;
-                    Self::pre_execution_type_stack_transition(
-                        &self.local_tys,
-                        &self.locals,
-                        self.ty_args(),
-                        resolver,
-                        interpreter,
-                        instruction,
-                    )?;
-                }
-
-                Interpreter::pre_hook_instr(gas_meter, &self.function, instruction);
+                Interpreter::pre_hook_instr(
+                    gas_meter,
+                    &self.function,
+                    instruction,
+                    &self.local_tys,
+                    &self.locals,
+                    &self.ty_args,
+                    resolver,
+                    interpreter,
+                );
 
                 let r = Self::execute_instruction(
                     &mut self.pc,
