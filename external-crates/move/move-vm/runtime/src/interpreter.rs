@@ -108,7 +108,7 @@ impl Interpreter {
         profile_open_frame!(gas_meter, function.pretty_string());
 
         /*
-           ParanoidTypeChecker::a(
+           ParanoidTypeChecker::push_parameter_types(
                &mut interpreter,
                &function,
                &ty_args,
@@ -192,7 +192,12 @@ impl Interpreter {
             let link_context = data_store.link_context();
             let resolver = function.get_resolver(link_context, loader);
 
-            ParanoidTypeChecker::a(&mut interpreter, &function, &ty_args, &resolver)?;
+            ParanoidTypeChecker::push_parameter_types(
+                &mut interpreter,
+                &function,
+                &ty_args,
+                &resolver,
+            )?;
 
             let return_values = interpreter
                 .call_native_return_values(
@@ -431,7 +436,7 @@ impl Interpreter {
                     .vm_config()
                     .enable_invariant_violation_check_in_swap_loc,
             )?;
-            ParanoidTypeChecker::c(
+            ParanoidTypeChecker::check_local_types(
                 self.paranoid_type_checks,
                 &mut self.operand_stack,
                 &func,
@@ -455,7 +460,7 @@ impl Interpreter {
         ty_args: Vec<Type>,
         locals: Locals,
     ) -> PartialVMResult<Frame> {
-        let local_tys = ParanoidTypeChecker::d(
+        let local_tys = ParanoidTypeChecker::get_local_types(
             self.paranoid_type_checks,
             &function,
             &ty_args,
@@ -533,7 +538,7 @@ impl Interpreter {
             self.operand_stack.push(value)?;
         }
 
-        ParanoidTypeChecker::e(
+        ParanoidTypeChecker::push_return_types(
             self.paranoid_type_checks,
             &mut self.operand_stack,
             &function,
@@ -559,7 +564,7 @@ impl Interpreter {
             args.push_front(self.operand_stack.pop()?);
         }
 
-        ParanoidTypeChecker::f(
+        ParanoidTypeChecker::check_parameter_types(
             self.paranoid_type_checks,
             &mut self.operand_stack,
             &function,
@@ -2559,14 +2564,14 @@ impl Frame {
 pub struct ParanoidTypeChecker {}
 
 impl ParanoidTypeChecker {
-    fn a(
+    /// Validate fn parameter types and push to operand stack
+    fn push_parameter_types(
         interpreter: &mut Interpreter,
         function: &Function,
         ty_args: &[Type],
         resolver: &Resolver,
     ) -> VMResult<()> {
         if interpreter.paranoid_type_checks {
-            // ignore
             for ty in function.parameter_types() {
                 let type_ = if ty_args.is_empty() {
                     ty.clone()
@@ -2590,13 +2595,12 @@ impl ParanoidTypeChecker {
         callee: &Arc<Function>,
     ) -> VMResult<()> {
         if interpreter.paranoid_type_checks {
-            // ignore
             interpreter.check_friend_or_private_call(caller, callee)?;
         }
         Ok(())
     }
 
-    fn c(
+    fn check_local_types(
         paranoid: bool,
         operand_stack: &mut Stack,
         function: &Function,
@@ -2623,7 +2627,7 @@ impl ParanoidTypeChecker {
         Ok(())
     }
 
-    fn d(
+    fn get_local_types(
         paranoid: bool,
         function: &Function,
         ty_args: &[Type],
@@ -2646,7 +2650,7 @@ impl ParanoidTypeChecker {
         })
     }
 
-    fn e(
+    fn push_return_types(
         paranoid: bool,
         operand_stack: &mut Stack,
         function: &Function,
@@ -2660,7 +2664,8 @@ impl ParanoidTypeChecker {
         Ok(())
     }
 
-    fn f(
+    /// Pop from operand stack and validate types
+    fn check_parameter_types(
         paranoid: bool,
         operand_stack: &mut Stack,
         function: &Function,
@@ -2689,7 +2694,6 @@ impl ParanoidTypeChecker {
         instruction: &Bytecode,
     ) -> PartialVMResult<()> {
         if interpreter.paranoid_type_checks {
-            // ignore
             interpreter.operand_stack.check_balance()?;
             Frame::pre_execution_type_stack_transition(
                 local_tys,
@@ -2713,7 +2717,6 @@ impl ParanoidTypeChecker {
     ) -> PartialVMResult<()> {
         if let InstrRet::Ok = r {
             if interpreter.paranoid_type_checks {
-                // ignore
                 Frame::post_execution_type_stack_transition(
                     local_tys,
                     ty_args,
