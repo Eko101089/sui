@@ -106,6 +106,18 @@ impl Interpreter {
 
     pub fn pre_hook_fn(gas_meter: &mut impl GasMeter, function: &Arc<Function>) -> () {
         profile_open_frame!(gas_meter, function.pretty_string());
+
+        /*
+           ParanoidTypeChecker::a(
+               &mut interpreter,
+               &function,
+               &ty_args,
+               &resolver,
+           )?;
+        */
+        /*
+           ParanoidTypeChecker::check_friend_or_private_call(&mut self, &current_frame.function, &func)?;
+        */
     }
 
     pub fn post_hook_fn(gas_meter: &mut impl GasMeter, function: &Arc<Function>) -> () {
@@ -122,17 +134,14 @@ impl Interpreter {
         resolver: &Resolver,
         interpreter: &mut Interpreter,
     ) -> PartialVMResult<()> {
-        if interpreter.paranoid_type_checks {
-            interpreter.operand_stack.check_balance()?;
-            Frame::pre_execution_type_stack_transition(
-                local_tys,
-                locals,
-                ty_args,
-                resolver,
-                interpreter,
-                instruction,
-            )?;
-        }
+        ParanoidTypeChecker::pre_instr(
+            local_tys,
+            locals,
+            ty_args,
+            resolver,
+            interpreter,
+            instruction,
+        )?;
 
         profile_open_instr!(gas_meter, format!("{:?}", instruction));
         Ok(())
@@ -149,20 +158,7 @@ impl Interpreter {
         r: &InstrRet,
     ) -> PartialVMResult<()> {
         profile_close_instr!(gas_meter, format!("{:?}", instruction));
-
-        if let InstrRet::Ok = r {
-            if interpreter.paranoid_type_checks {
-                Frame::post_execution_type_stack_transition(
-                    local_tys,
-                    ty_args,
-                    resolver,
-                    interpreter,
-                    instruction,
-                )?;
-
-                interpreter.operand_stack.check_balance()?;
-            }
-        }
+        ParanoidTypeChecker::post_instr(local_tys, ty_args, resolver, interpreter, instruction, r)?;
         Ok(())
     }
 
@@ -196,21 +192,7 @@ impl Interpreter {
             let link_context = data_store.link_context();
             let resolver = function.get_resolver(link_context, loader);
 
-            if interpreter.paranoid_type_checks {
-                for ty in function.parameter_types() {
-                    let type_ = if ty_args.is_empty() {
-                        ty.clone()
-                    } else {
-                        resolver
-                            .subst(ty, &ty_args)
-                            .map_err(|e| e.finish(Location::Undefined))?
-                    };
-                    interpreter
-                        .operand_stack
-                        .push_ty(type_)
-                        .map_err(|e| e.finish(Location::Undefined))?;
-                }
-            }
+            ParanoidTypeChecker::a(&mut interpreter, &function, &ty_args, &resolver)?;
 
             let return_values = interpreter
                 .call_native_return_values(
@@ -312,9 +294,11 @@ impl Interpreter {
                     // let func_name = func.pretty_string();
                     // profile_open_frame!(gas_meter, func_name.clone());
 
-                    if self.paranoid_type_checks {
-                        self.check_friend_or_private_call(&current_frame.function, &func)?;
-                    }
+                    ParanoidTypeChecker::check_friend_or_private_call(
+                        &mut self,
+                        &current_frame.function,
+                        &func,
+                    )?;
 
                     // Charge gas
                     let module_id = func
@@ -372,9 +356,11 @@ impl Interpreter {
                     #[cfg(debug_assertions)]
                     Self::pre_hook_fn(gas_meter, &func);
 
-                    if self.paranoid_type_checks {
-                        self.check_friend_or_private_call(&current_frame.function, &func)?;
-                    }
+                    ParanoidTypeChecker::check_friend_or_private_call(
+                        &mut self,
+                        &current_frame.function,
+                        &func,
+                    )?;
 
                     // Charge gas
                     let module_id = func
@@ -445,19 +431,15 @@ impl Interpreter {
                     .vm_config()
                     .enable_invariant_violation_check_in_swap_loc,
             )?;
-
-            if self.paranoid_type_checks {
-                let ty = self.operand_stack.pop_ty()?;
-                let resolver = func.get_resolver(link_context, loader);
-                if is_generic {
-                    ty.check_eq(
-                        &resolver.subst(&func.local_types()[arg_count - i - 1], &ty_args)?,
-                    )?;
-                } else {
-                    // Directly check against the expected type to save a clone here.
-                    ty.check_eq(&func.local_types()[arg_count - i - 1])?;
-                }
-            }
+            ParanoidTypeChecker::c(
+                self.paranoid_type_checks,
+                &mut self.operand_stack,
+                &func,
+                &ty_args,
+                loader,
+                link_context,
+                i,
+            )?;
         }
         self.make_new_frame(link_context, loader, func, ty_args, locals)
     }
@@ -473,20 +455,14 @@ impl Interpreter {
         ty_args: Vec<Type>,
         locals: Locals,
     ) -> PartialVMResult<Frame> {
-        let local_tys = if self.paranoid_type_checks {
-            if ty_args.is_empty() {
-                function.local_types().to_vec()
-            } else {
-                let resolver = function.get_resolver(link_context, loader);
-                function
-                    .local_types()
-                    .iter()
-                    .map(|ty| resolver.subst(ty, &ty_args))
-                    .collect::<PartialVMResult<Vec<_>>>()?
-            }
-        } else {
-            vec![]
-        };
+        let local_tys = ParanoidTypeChecker::d(
+            self.paranoid_type_checks,
+            &function,
+            &ty_args,
+            link_context,
+            loader,
+        )?;
+
         Ok(Frame {
             pc: 0,
             locals,
@@ -557,11 +533,13 @@ impl Interpreter {
             self.operand_stack.push(value)?;
         }
 
-        if self.paranoid_type_checks {
-            for ty in function.return_types() {
-                self.operand_stack.push_ty(ty.subst(&ty_args)?)?;
-            }
-        }
+        ParanoidTypeChecker::e(
+            self.paranoid_type_checks,
+            &mut self.operand_stack,
+            &function,
+            &ty_args,
+        )?;
+
         Ok(())
     }
 
@@ -581,14 +559,13 @@ impl Interpreter {
             args.push_front(self.operand_stack.pop()?);
         }
 
-        if self.paranoid_type_checks {
-            for i in 0..expected_args {
-                let expected_ty =
-                    resolver.subst(&function.parameter_types()[expected_args - i - 1], ty_args)?;
-                let ty = self.operand_stack.pop_ty()?;
-                ty.check_eq(&expected_ty)?;
-            }
-        }
+        ParanoidTypeChecker::f(
+            self.paranoid_type_checks,
+            &mut self.operand_stack,
+            &function,
+            ty_args,
+            resolver,
+        )?;
 
         let mut native_context = NativeContext::new(
             self,
@@ -2451,6 +2428,14 @@ impl Frame {
                     &r,
                 );
 
+                match r {
+                    InstrRet::Ok => (),
+                    InstrRet::ExitCode(exit_code) => {
+                        return Ok(exit_code);
+                    }
+                    InstrRet::Branch => break,
+                };
+
                 // invariant: advance to pc +1 is iff instruction at pc executed without aborting
                 self.pc += 1;
             }
@@ -2568,5 +2553,178 @@ impl Frame {
         };
 
         Ok(ty_depth)
+    }
+}
+
+pub struct ParanoidTypeChecker {}
+
+impl ParanoidTypeChecker {
+    fn a(
+        interpreter: &mut Interpreter,
+        function: &Function,
+        ty_args: &[Type],
+        resolver: &Resolver,
+    ) -> VMResult<()> {
+        if interpreter.paranoid_type_checks {
+            // ignore
+            for ty in function.parameter_types() {
+                let type_ = if ty_args.is_empty() {
+                    ty.clone()
+                } else {
+                    resolver
+                        .subst(ty, &ty_args)
+                        .map_err(|e| e.finish(Location::Undefined))?
+                };
+                interpreter
+                    .operand_stack
+                    .push_ty(type_)
+                    .map_err(|e| e.finish(Location::Undefined))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_friend_or_private_call(
+        interpreter: &mut Interpreter,
+        caller: &Arc<Function>,
+        callee: &Arc<Function>,
+    ) -> VMResult<()> {
+        if interpreter.paranoid_type_checks {
+            // ignore
+            interpreter.check_friend_or_private_call(caller, callee)?;
+        }
+        Ok(())
+    }
+
+    fn c(
+        paranoid: bool,
+        operand_stack: &mut Stack,
+        function: &Function,
+        ty_args: &[Type],
+        loader: &Loader,
+        link_context: AccountAddress,
+        i: usize,
+    ) -> PartialVMResult<()> {
+        let arg_count = function.arg_count();
+        let is_generic = !ty_args.is_empty();
+
+        if paranoid {
+            let ty = operand_stack.pop_ty()?;
+            let resolver = function.get_resolver(link_context, loader);
+            if is_generic {
+                ty.check_eq(
+                    &resolver.subst(&function.local_types()[arg_count - i - 1], &ty_args)?,
+                )?;
+            } else {
+                // Directly check against the expected type to save a clone here.
+                ty.check_eq(&function.local_types()[arg_count - i - 1])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn d(
+        paranoid: bool,
+        function: &Function,
+        ty_args: &[Type],
+        link_context: AccountAddress,
+        loader: &Loader,
+    ) -> PartialVMResult<Vec<Type>> {
+        Ok(if paranoid {
+            if ty_args.is_empty() {
+                function.local_types().to_vec()
+            } else {
+                let resolver = function.get_resolver(link_context, loader);
+                function
+                    .local_types()
+                    .iter()
+                    .map(|ty| resolver.subst(ty, &ty_args))
+                    .collect::<PartialVMResult<Vec<_>>>()?
+            }
+        } else {
+            vec![]
+        })
+    }
+
+    fn e(
+        paranoid: bool,
+        operand_stack: &mut Stack,
+        function: &Function,
+        ty_args: &[Type],
+    ) -> PartialVMResult<()> {
+        if paranoid {
+            for ty in function.return_types() {
+                operand_stack.push_ty(ty.subst(ty_args)?)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn f(
+        paranoid: bool,
+        operand_stack: &mut Stack,
+        function: &Function,
+        ty_args: &[Type],
+        resolver: &Resolver,
+    ) -> PartialVMResult<()> {
+        let expected_args = function.arg_count();
+
+        if paranoid {
+            for i in 0..expected_args {
+                let expected_ty =
+                    resolver.subst(&function.parameter_types()[expected_args - i - 1], ty_args)?;
+                let ty = operand_stack.pop_ty()?;
+                ty.check_eq(&expected_ty)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn pre_instr(
+        local_tys: &[Type],
+        locals: &Locals,
+        ty_args: &[Type],
+        resolver: &Resolver,
+        interpreter: &mut Interpreter,
+        instruction: &Bytecode,
+    ) -> PartialVMResult<()> {
+        if interpreter.paranoid_type_checks {
+            // ignore
+            interpreter.operand_stack.check_balance()?;
+            Frame::pre_execution_type_stack_transition(
+                local_tys,
+                locals,
+                ty_args,
+                resolver,
+                interpreter,
+                instruction,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn post_instr(
+        local_tys: &[Type],
+        ty_args: &[Type],
+        resolver: &Resolver,
+        interpreter: &mut Interpreter,
+        instruction: &Bytecode,
+        r: &InstrRet,
+    ) -> PartialVMResult<()> {
+        if let InstrRet::Ok = r {
+            if interpreter.paranoid_type_checks {
+                // ignore
+                Frame::post_execution_type_stack_transition(
+                    local_tys,
+                    ty_args,
+                    resolver,
+                    interpreter,
+                    instruction,
+                )?;
+
+                interpreter.operand_stack.check_balance()?;
+            }
+        }
+        Ok(())
     }
 }
