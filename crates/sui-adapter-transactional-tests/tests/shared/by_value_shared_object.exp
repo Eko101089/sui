@@ -47,11 +47,11 @@ gas summary: computation_cost: 1000000, storage_cost: 2226800,  storage_rebate: 
 
 task 10 'run'. lines 82-82:
 Error: Transaction Effects Status: Move Runtime Abort. Location: sui::transfer::freeze_object_impl (function index 6) at offset 0, Abort Code: 1
-Cannot return execution error with shared objects. Debug of error: MoveAbort(MoveLocation { module: ModuleId { address: sui, name: Identifier("transfer") }, function: 6, instruction: 0, function_name: Some("freeze_object_impl") }, 1) at command Some(0)
+Debug of error: MoveAbort(MoveLocation { module: ModuleId { address: sui, name: Identifier("transfer") }, function: 6, instruction: 0, function_name: Some("freeze_object_impl") }, 1) at command Some(0)
 
 task 11 'run'. lines 84-84:
 Error: Transaction Effects Status: Move Runtime Abort. Location: sui::transfer::transfer_impl (function index 8) at offset 0, Abort Code: 0
-Cannot return execution error with shared objects. Debug of error: MoveAbort(MoveLocation { module: ModuleId { address: sui, name: Identifier("transfer") }, function: 8, instruction: 0, function_name: Some("transfer_impl") }, 0) at command Some(0)
+Debug of error: MoveAbort(MoveLocation { module: ModuleId { address: sui, name: Identifier("transfer") }, function: 8, instruction: 0, function_name: Some("transfer_impl") }, 0) at command Some(0)
 
 task 12 'run'. lines 86-86:
 mutated: object(0,0), object(9,0)
@@ -63,4 +63,4 @@ gas summary: computation_cost: 1000000, storage_cost: 2226800,  storage_rebate: 
 
 task 14 'run'. lines 90-90:
 Error: Transaction Effects Status: Shared object operations such a wrapping, freezing, or converting to owned are not allowed.
-Cannot return execution error with shared objects. Debug of error: SharedObjectOperationNotAllowed at command None
+Debug of error: SharedObjectOperationNotAllowed at command None

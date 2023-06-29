@@ -1170,10 +1170,7 @@ impl<'a> SuiTestAdapter<'a> {
             }
             ExecutionStatus::Failure { error, command } => {
                 let execution_msg = if with_shared {
-                    format!(
-                        "Cannot return execution error with shared objects. \
-                        Debug of error: {error:?} at command {command:?}"
-                    )
+                    format!("Debug of error: {error:?} at command {command:?}")
                 } else {
                     format!("Execution Error: {}", error_opt.unwrap())
                 };
