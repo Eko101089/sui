@@ -104,113 +104,28 @@ impl Interpreter {
         &self.runtime_limits_config
     }
 
-    pub fn pre_hook_fn(
-        gas_meter: &mut impl GasMeter,
-        function: &Arc<Function>,
-        ty_args: &[Type],
-        data_store: &impl DataStore,
-        loader: &Loader,
-        interpreter: &mut Interpreter,
-        exit_code: Option<&ExitCode>,
-    ) -> VMResult<()> {
+    pub fn pre_hook_fn(gas_meter: &mut impl GasMeter, function: &Arc<Function>) -> () {
         profile_open_frame!(gas_meter, function.pretty_string());
-
-        if interpreter.paranoid_type_checks {
-            // which scenario
-            if function.is_native() {
-                let link_context = data_store.link_context();
-                let resolver = function.get_resolver(link_context, loader);
-
-                for ty in function.parameter_types() {
-                    let type_ = if ty_args.is_empty() {
-                        ty.clone()
-                    } else {
-                        resolver
-                            .subst(ty, &ty_args)
-                            .map_err(|e| e.finish(Location::Undefined))?
-                    };
-                    interpreter
-                        .operand_stack
-                        .push_ty(type_)
-                        .map_err(|e| e.finish(Location::Undefined))?;
-                }
-            }
-            if let Some(exit_code) = exit_code {
-                match exit_code {
-                    ExitCode::Call(_) | ExitCode::CallGeneric(_) => {
-                        self.check_friend_or_private_call(&current_frame.function, &func)?;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
     }
 
     pub fn pre_hook_instr(
         gas_meter: &mut impl GasMeter,
         function: &Arc<Function>,
         instruction: &Bytecode,
-        local_tys: &[Type],
-        locals: &Locals,
-        ty_args: &[Type],
-        resolver: &Resolver,
-        interpreter: &mut Interpreter,
-    ) -> PartialVMResult<()> {
+    ) -> () {
         profile_open_instr!(gas_meter, format!("{:?}", instruction));
-
-        if interpreter.paranoid_type_checks {
-            interpreter.operand_stack.check_balance()?;
-            Frame::pre_execution_type_stack_transition(
-                local_tys,
-                locals,
-                ty_args,
-                resolver,
-                interpreter,
-                instruction,
-            )?;
-        }
-        Ok(())
     }
 
     pub fn post_hook_fn(gas_meter: &mut impl GasMeter, function: &Arc<Function>) -> () {
         profile_close_frame!(gas_meter, function.pretty_string());
-
-        // if call_native
-        if self.paranoid_type_checks {
-            for ty in function.return_types() {
-                self.operand_stack.push_ty(ty.subst(&ty_args)?)?;
-            }
-        }
     }
 
     pub fn post_hook_instr(
         gas_meter: &mut impl GasMeter,
         function: &Arc<Function>,
         instruction: &Bytecode,
-        r: &InstrRet,
-        local_tys: &[Type],
-        ty_args: &[Type],
-        resolver: &Resolver,
-        interpreter: &mut Interpreter,
-    ) -> PartialVMResult<()> {
+    ) -> () {
         profile_close_instr!(gas_meter, format!("{:?}", instruction));
-
-        // only run if InstrRet::Ok
-        if let InstrRet::Ok = r {
-            if interpreter.paranoid_type_checks {
-                Frame::post_execution_type_stack_transition(
-                    local_tys,
-                    ty_args,
-                    resolver,
-                    interpreter,
-                    instruction,
-                )?;
-
-                interpreter.operand_stack.check_balance()?;
-            }
-        }
-        Ok(())
     }
 
     /// Entrypoint into the interpreter. All external calls need to be routed through this
@@ -231,14 +146,7 @@ impl Interpreter {
             runtime_limits_config: loader.vm_config().runtime_limits_config.clone(),
         };
 
-        Self::pre_hook_fn(
-            gas_meter,
-            &function,
-            &ty_args,
-            data_store,
-            loader,
-            &mut interpreter,
-        );
+        Self::pre_hook_fn(gas_meter, &function);
 
         if function.is_native() {
             for arg in args {
@@ -250,14 +158,21 @@ impl Interpreter {
             let link_context = data_store.link_context();
             let resolver = function.get_resolver(link_context, loader);
 
-            Self::pre_hook_fn(
-                gas_meter,
-                &function,
-                &ty_args,
-                data_store,
-                loader,
-                &mut interpreter,
-            );
+            if interpreter.paranoid_type_checks {
+                for ty in function.parameter_types() {
+                    let type_ = if ty_args.is_empty() {
+                        ty.clone()
+                    } else {
+                        resolver
+                            .subst(ty, &ty_args)
+                            .map_err(|e| e.finish(Location::Undefined))?
+                    };
+                    interpreter
+                        .operand_stack
+                        .push_ty(type_)
+                        .map_err(|e| e.finish(Location::Undefined))?;
+                }
+            }
 
             let return_values = interpreter
                 .call_native_return_values(
@@ -283,14 +198,6 @@ impl Interpreter {
 
             Ok(return_values.into_iter().collect())
         } else {
-            Self::pre_hook_fn(
-                gas_meter,
-                &function,
-                &ty_args,
-                data_store,
-                loader,
-                &mut interpreter,
-            );
             interpreter.execute_main(
                 loader, data_store, gas_meter, extensions, function, ty_args, args,
             )
@@ -363,14 +270,13 @@ impl Interpreter {
                     let func = resolver.function_from_handle(fh_idx);
                     // Compiled out in release mode
                     #[cfg(debug_assertions)]
-                    Self::pre_hook_fn(
-                        gas_meter,
-                        &func,
-                        &current_frame.ty_args,
-                        data_store,
-                        loader,
-                        &mut self,
-                    );
+                    Self::pre_hook_fn(gas_meter, &func);
+                    // let func_name = func.pretty_string();
+                    // profile_open_frame!(gas_meter, func_name.clone());
+
+                    if self.paranoid_type_checks {
+                        self.check_friend_or_private_call(&current_frame.function, &func)?;
+                    }
 
                     // Charge gas
                     let module_id = func
@@ -402,6 +308,7 @@ impl Interpreter {
                         )?;
                         current_frame.pc += 1; // advance past the Call instruction in the caller
 
+                        // can we move this into call_native?
                         Self::post_hook_fn(gas_meter, &func);
                         continue;
                     }
@@ -425,14 +332,11 @@ impl Interpreter {
                     let func = resolver.function_from_instantiation(idx);
                     // Compiled out in release mode
                     #[cfg(debug_assertions)]
-                    Self::pre_hook_fn(
-                        gas_meter,
-                        &func,
-                        &current_frame.ty_args,
-                        data_store,
-                        loader,
-                        &mut self,
-                    );
+                    Self::pre_hook_fn(gas_meter, &func);
+
+                    if self.paranoid_type_checks {
+                        self.check_friend_or_private_call(&current_frame.function, &func)?;
+                    }
 
                     // Charge gas
                     let module_id = func
@@ -460,6 +364,7 @@ impl Interpreter {
                         )?;
                         current_frame.pc += 1; // advance past the Call instruction in the caller
 
+                        // can we move this into call_native?
                         Self::post_hook_fn(gas_meter, &func);
 
                         continue;
@@ -612,6 +517,12 @@ impl Interpreter {
         // the Return instruction for normal calls
         for value in return_values {
             self.operand_stack.push(value)?;
+        }
+
+        if self.paranoid_type_checks {
+            for ty in function.return_types() {
+                self.operand_stack.push_ty(ty.subst(&ty_args)?)?;
+            }
         }
         Ok(())
     }
@@ -2468,16 +2379,19 @@ impl Frame {
                 // The reason for this design is we charge gas during instruction execution and we want to perform checks only after
                 // proper gas has been charged for each instruction.
 
-                Interpreter::pre_hook_instr(
-                    gas_meter,
-                    &self.function,
-                    instruction,
-                    &self.local_tys,
-                    &self.locals,
-                    self.ty_args(),
-                    resolver,
-                    interpreter,
-                );
+                if interpreter.paranoid_type_checks {
+                    interpreter.operand_stack.check_balance()?;
+                    Self::pre_execution_type_stack_transition(
+                        &self.local_tys,
+                        &self.locals,
+                        self.ty_args(),
+                        resolver,
+                        interpreter,
+                        instruction,
+                    )?;
+                }
+
+                Interpreter::pre_hook_instr(gas_meter, &self.function, instruction);
 
                 let r = Self::execute_instruction(
                     &mut self.pc,
@@ -2491,16 +2405,7 @@ impl Frame {
                     instruction,
                 )?;
 
-                Interpreter::post_hook_instr(
-                    gas_meter,
-                    &self.function,
-                    instruction,
-                    &r,
-                    &self.local_tys,
-                    &self.ty_args,
-                    resolver,
-                    interpreter,
-                );
+                Interpreter::post_hook_instr(gas_meter, &self.function, instruction);
 
                 match r {
                     InstrRet::Ok => (),
@@ -2509,6 +2414,18 @@ impl Frame {
                     }
                     InstrRet::Branch => break,
                 };
+
+                if interpreter.paranoid_type_checks {
+                    Self::post_execution_type_stack_transition(
+                        &self.local_tys,
+                        &self.ty_args,
+                        resolver,
+                        interpreter,
+                        instruction,
+                    )?;
+
+                    interpreter.operand_stack.check_balance()?;
+                }
 
                 // invariant: advance to pc +1 is iff instruction at pc executed without aborting
                 self.pc += 1;
