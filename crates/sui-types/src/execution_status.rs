@@ -182,10 +182,14 @@ pub enum ExecutionFailureStatus {
         Please run the Sui Move Verifier for more information."
     )]
     SuiMoveVerificationTimedout,
+
+    #[error(
+        "Shared object operations such a wrapping, freezing, or converting to owned are not \
+    allowed."
+    )]
+    SharedObjectOperationNotAllowed,
     // NOTE: if you want to add a new enum,
     // please add it at the end for Rust SDK backward compatibility.
-    #[error("Shared objects cannot be wrapped.")]
-    SharedObjectOperationNotAllowed,
 }
 
 #[derive(Eq, PartialEq, Clone, Debug, Serialize, Deserialize, Hash)]

@@ -67,12 +67,14 @@ module t1::o1 {
 
 //# view-object 3,0
 
+// this deletes an object through consumption by another module
 //# run t1::o1::consume_o2 --args object(3,0)
 
 //# run t2::o2::create
 
 //# view-object 6,0
 
+// this deletes an object directly via the defining module
 //# run t2::o2::consume_o2 --args object(6,0)
 
 //# run t2::o2::create
