@@ -124,8 +124,28 @@ impl Interpreter {
         gas_meter: &mut impl GasMeter,
         function: &Arc<Function>,
         instruction: &Bytecode,
-    ) -> () {
+        local_tys: &[Type],
+        ty_args: &[Type],
+        resolver: &Resolver,
+        interpreter: &mut Interpreter,
+        r: &InstrRet,
+    ) -> PartialVMResult<()> {
         profile_close_instr!(gas_meter, format!("{:?}", instruction));
+
+        if let InstrRet::Ok = r {
+            if interpreter.paranoid_type_checks {
+                Frame::post_execution_type_stack_transition(
+                    local_tys,
+                    ty_args,
+                    resolver,
+                    interpreter,
+                    instruction,
+                )?;
+
+                interpreter.operand_stack.check_balance()?;
+            }
+        }
+        Ok(())
     }
 
     /// Entrypoint into the interpreter. All external calls need to be routed through this
@@ -2405,27 +2425,16 @@ impl Frame {
                     instruction,
                 )?;
 
-                Interpreter::post_hook_instr(gas_meter, &self.function, instruction);
-
-                match r {
-                    InstrRet::Ok => (),
-                    InstrRet::ExitCode(exit_code) => {
-                        return Ok(exit_code);
-                    }
-                    InstrRet::Branch => break,
-                };
-
-                if interpreter.paranoid_type_checks {
-                    Self::post_execution_type_stack_transition(
-                        &self.local_tys,
-                        &self.ty_args,
-                        resolver,
-                        interpreter,
-                        instruction,
-                    )?;
-
-                    interpreter.operand_stack.check_balance()?;
-                }
+                Interpreter::post_hook_instr(
+                    gas_meter,
+                    &self.function,
+                    instruction,
+                    &self.local_tys,
+                    &self.ty_args,
+                    resolver,
+                    interpreter,
+                    &r,
+                );
 
                 // invariant: advance to pc +1 is iff instruction at pc executed without aborting
                 self.pc += 1;
