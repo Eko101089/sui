@@ -104,20 +104,76 @@ impl Interpreter {
         &self.runtime_limits_config
     }
 
-    pub fn pre_hook_fn(gas_meter: &mut impl GasMeter, function: &Arc<Function>) -> () {
+    pub fn pre_hook_fn(
+        &mut self,
+        gas_meter: &mut impl GasMeter,
+        function: &Arc<Function>,
+        ty_args: &[Type],
+        data_store: &mut impl DataStore,
+        loader: &Loader,
+        frame: Option<&Frame>,
+    ) -> VMResult<()> {
         profile_open_frame!(gas_meter, function.pretty_string());
 
-        /*
-           ParanoidTypeChecker::push_parameter_types(
-               &mut interpreter,
-               &function,
-               &ty_args,
-               &resolver,
-           )?;
-        */
-        /*
-           ParanoidTypeChecker::check_friend_or_private_call(&mut self, &current_frame.function, &func)?;
-        */
+        /* function-agnostic */
+        // when Interpreter.entrypoint is called
+        ParanoidTypeChecker::push_parameter_types(
+            &mut interpreter,
+            &function,
+            &ty_args,
+            data_store,
+            loader,
+        )?;
+
+        // else if ExitCode::Call or ExitCode::CallGeneric
+        // support this by passing in optional current_frame
+        if exit_code {
+            ParanoidTypeChecker::check_friend_or_private_call(
+                &mut self,
+                &current_frame.function,
+                &function,
+            )?;
+            // gas_meter.charge_call
+            if !function.is_native() {
+                // should make sure current_frame vs next function
+                // formerly in make_call_frame
+                ParanoidTypeChecker::check_local_types(
+                    self.paranoid_type_checks,
+                    &mut self.operand_stack,
+                    &function,
+                    &ty_args,
+                    loader,
+                    link_context,
+                )?;
+                ParanoidTypeChecker::get_local_types(
+                    self.paranoid_type_checks,
+                    &function,
+                    &ty_args,
+                    link_context,
+                    loader,
+                )?;
+            } else {
+                // is native
+                // call_native_return_values
+                ParanoidTypeChecker::check_parameter_types(
+                    // post-hook call_native
+                    self.paranoid_type_checks,
+                    &mut self.operand_stack,
+                    &function,
+                    ty_args,
+                    resolver,
+                )?;
+                // gas_meter.charge_native_function_before_execution
+                ParanoidTypeChecker::push_return_types(
+                    // post-hook call_native
+                    self.paranoid_type_checks,
+                    &mut self.operand_stack,
+                    &function,
+                    &ty_args,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn post_hook_fn(gas_meter: &mut impl GasMeter, function: &Arc<Function>) -> () {
@@ -180,7 +236,15 @@ impl Interpreter {
             runtime_limits_config: loader.vm_config().runtime_limits_config.clone(),
         };
 
-        Self::pre_hook_fn(gas_meter, &function);
+        Self::pre_hook_fn(
+            &mut interpreter,
+            gas_meter,
+            &function,
+            &ty_args,
+            data_store,
+            loader,
+            None,
+        );
 
         if function.is_native() {
             for arg in args {
@@ -191,13 +255,6 @@ impl Interpreter {
             }
             let link_context = data_store.link_context();
             let resolver = function.get_resolver(link_context, loader);
-
-            ParanoidTypeChecker::push_parameter_types(
-                &mut interpreter,
-                &function,
-                &ty_args,
-                &resolver,
-            )?;
 
             let return_values = interpreter
                 .call_native_return_values(
@@ -295,15 +352,15 @@ impl Interpreter {
                     let func = resolver.function_from_handle(fh_idx);
                     // Compiled out in release mode
                     #[cfg(debug_assertions)]
-                    Self::pre_hook_fn(gas_meter, &func);
-                    // let func_name = func.pretty_string();
-                    // profile_open_frame!(gas_meter, func_name.clone());
-
-                    ParanoidTypeChecker::check_friend_or_private_call(
+                    Self::pre_hook_fn(
                         &mut self,
-                        &current_frame.function,
+                        gas_meter,
                         &func,
-                    )?;
+                        &current_frame.ty_args(),
+                        data_store,
+                        loader,
+                        Some(&current_frame),
+                    );
 
                     // Charge gas
                     let module_id = func
@@ -359,13 +416,15 @@ impl Interpreter {
                     let func = resolver.function_from_instantiation(idx);
                     // Compiled out in release mode
                     #[cfg(debug_assertions)]
-                    Self::pre_hook_fn(gas_meter, &func);
-
-                    ParanoidTypeChecker::check_friend_or_private_call(
+                    Self::pre_hook_fn(
                         &mut self,
-                        &current_frame.function,
+                        gas_meter,
                         &func,
-                    )?;
+                        &current_frame.ty_args(),
+                        data_store,
+                        loader,
+                        Some(&current_frame),
+                    );
 
                     // Charge gas
                     let module_id = func
@@ -436,15 +495,7 @@ impl Interpreter {
                     .vm_config()
                     .enable_invariant_violation_check_in_swap_loc,
             )?;
-            ParanoidTypeChecker::check_local_types(
-                self.paranoid_type_checks,
-                &mut self.operand_stack,
-                &func,
-                &ty_args,
-                loader,
-                link_context,
-                i,
-            )?;
+            // ParanoidTypeChecker::check_local_types
         }
         self.make_new_frame(link_context, loader, func, ty_args, locals)
     }
@@ -460,7 +511,9 @@ impl Interpreter {
         ty_args: Vec<Type>,
         locals: Locals,
     ) -> PartialVMResult<Frame> {
+        // todo: something like operations.contains(&Operation::ParanoidTypeChecks)
         let local_tys = ParanoidTypeChecker::get_local_types(
+            // pre-hook non-native function, make_call_frame, execute_main
             self.paranoid_type_checks,
             &function,
             &ty_args,
@@ -538,12 +591,7 @@ impl Interpreter {
             self.operand_stack.push(value)?;
         }
 
-        ParanoidTypeChecker::push_return_types(
-            self.paranoid_type_checks,
-            &mut self.operand_stack,
-            &function,
-            &ty_args,
-        )?;
+        // ParanoidTypeChecker::push_return_types( // post-hook call_native
 
         Ok(())
     }
@@ -564,13 +612,7 @@ impl Interpreter {
             args.push_front(self.operand_stack.pop()?);
         }
 
-        ParanoidTypeChecker::check_parameter_types(
-            self.paranoid_type_checks,
-            &mut self.operand_stack,
-            &function,
-            ty_args,
-            resolver,
-        )?;
+        // ParanoidTypeChecker::check_parameter_types( // post-hook call_native
 
         let mut native_context = NativeContext::new(
             self,
@@ -2569,9 +2611,13 @@ impl ParanoidTypeChecker {
         interpreter: &mut Interpreter,
         function: &Function,
         ty_args: &[Type],
-        resolver: &Resolver,
+        data_store: &mut impl DataStore,
+        loader: &Loader,
     ) -> VMResult<()> {
         if interpreter.paranoid_type_checks {
+            let link_context = data_store.link_context();
+            let resolver = function.get_resolver(link_context, loader);
+
             for ty in function.parameter_types() {
                 let type_ = if ty_args.is_empty() {
                     ty.clone()
@@ -2607,21 +2653,22 @@ impl ParanoidTypeChecker {
         ty_args: &[Type],
         loader: &Loader,
         link_context: AccountAddress,
-        i: usize,
     ) -> PartialVMResult<()> {
         let arg_count = function.arg_count();
         let is_generic = !ty_args.is_empty();
 
         if paranoid {
-            let ty = operand_stack.pop_ty()?;
-            let resolver = function.get_resolver(link_context, loader);
-            if is_generic {
-                ty.check_eq(
-                    &resolver.subst(&function.local_types()[arg_count - i - 1], &ty_args)?,
-                )?;
-            } else {
-                // Directly check against the expected type to save a clone here.
-                ty.check_eq(&function.local_types()[arg_count - i - 1])?;
+            for i in 0..arg_count {
+                let ty = operand_stack.pop_ty()?;
+                let resolver = function.get_resolver(link_context, loader);
+                if is_generic {
+                    ty.check_eq(
+                        &resolver.subst(&function.local_types()[arg_count - i - 1], &ty_args)?,
+                    )?;
+                } else {
+                    // Directly check against the expected type to save a clone here.
+                    ty.check_eq(&function.local_types()[arg_count - i - 1])?;
+                }
             }
         }
         Ok(())
