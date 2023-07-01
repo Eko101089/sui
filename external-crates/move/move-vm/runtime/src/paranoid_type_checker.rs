@@ -8,9 +8,7 @@ use move_binary_format::{
     file_format::{Ability, AbilitySet, Bytecode},
 };
 use move_core_types::{account_address::AccountAddress, vm_status::StatusCode};
-use move_vm_types::{
-    data_store::DataStore, gas::GasMeter, loaded_data::runtime_types::Type, values::Locals,
-};
+use move_vm_types::{gas::GasMeter, loaded_data::runtime_types::Type, values::Locals};
 
 use crate::{
     interpreter::{check_ability, Frame, InstrRet, OperandStackInterface},
@@ -24,7 +22,7 @@ impl ParanoidTypeChecker {
         operand_stack: &mut OperandStackInterface,
         function: &Arc<Function>,
         ty_args: &[Type],
-        data_store: &mut impl DataStore,
+        link_context: AccountAddress,
         loader: &Loader,
     ) -> VMResult<()> {
         if function.is_native() {
@@ -32,18 +30,22 @@ impl ParanoidTypeChecker {
                 operand_stack,
                 &function,
                 &ty_args,
-                data_store,
+                link_context,
                 loader,
             )?;
-            let link_context = data_store.link_context();
             let resolver = function.get_resolver(link_context, loader);
-            ParanoidTypeChecker::check_parameter_types(
-                operand_stack,
-                &function,
-                ty_args,
-                &resolver,
-            )?;
-            ParanoidTypeChecker::push_return_types(operand_stack, &function, &ty_args)?;
+            ParanoidTypeChecker::native_function(operand_stack, &function, ty_args, &resolver)
+                .map_err(|e| match function.module_id() {
+                    // TODO(wlmyng): error handling interpreter role?
+                    Some(id) => e
+                        .at_code_offset(function.index(), 0)
+                        .finish(Location::Module(id.clone())),
+                    None => PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
+                        .with_message(
+                            "Unexpected native function not located in a module".to_owned(),
+                        )
+                        .finish(Location::Undefined),
+                })?;
         }
         Ok(())
     }
@@ -52,44 +54,39 @@ impl ParanoidTypeChecker {
         operand_stack: &mut OperandStackInterface,
         function: &Arc<Function>,
         ty_args: &[Type],
-        data_store: &mut impl DataStore,
+        link_context: AccountAddress,
         loader: &Loader,
         current_frame: &Frame,
     ) -> VMResult<()> {
+        ParanoidTypeChecker::check_friend_or_private_call(
+            operand_stack,
+            current_frame.function(),
+            &function,
+        )?;
         if function.is_native() {
-            ParanoidTypeChecker::check_friend_or_private_call(
-                operand_stack,
-                current_frame.function(),
-                &function,
-            )?;
-            let link_context = data_store.link_context();
             let resolver = function.get_resolver(link_context, loader);
-            ParanoidTypeChecker::check_parameter_types(
-                operand_stack,
-                &function,
-                ty_args,
-                &resolver,
-            )?;
-            ParanoidTypeChecker::push_return_types(operand_stack, &function, &ty_args)?;
+            ParanoidTypeChecker::native_function(operand_stack, &function, ty_args, &resolver)
+                .map_err(|e| match function.module_id() {
+                    // TODO(wlmyng): error handling interpreter role?
+                    Some(id) => e
+                        .at_code_offset(function.index(), 0)
+                        .finish(Location::Module(id.clone())),
+                    None => PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
+                        .with_message(
+                            "Unexpected native function not located in a module".to_owned(),
+                        )
+                        .finish(Location::Undefined),
+                })?;
         } else {
-            ParanoidTypeChecker::check_friend_or_private_call(
-                operand_stack,
-                current_frame.function(),
-                &function,
-            )?;
-            ParanoidTypeChecker::check_local_types(
+            ParanoidTypeChecker::non_native_function(
                 operand_stack,
                 &function,
                 &ty_args,
                 loader,
-                data_store.link_context(),
-            )?;
-            ParanoidTypeChecker::get_local_types(
-                &function,
-                &ty_args,
-                data_store.link_context(),
-                loader,
-            )?;
+                link_context,
+            )
+            .map_err(|e| self.set_location(e))
+            .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
         }
         Ok(())
     }
@@ -107,11 +104,11 @@ impl ParanoidTypeChecker {
         resolver: &Resolver,
     ) -> PartialVMResult<()> {
         ParanoidTypeChecker::pre_instr(
+            operand_stack,
             local_tys,
             locals,
             ty_args,
             resolver,
-            operand_stack,
             instruction,
         )?;
         Ok(())
@@ -142,10 +139,9 @@ impl ParanoidTypeChecker {
         operand_stack: &mut OperandStackInterface,
         function: &Function,
         ty_args: &[Type],
-        data_store: &mut impl DataStore,
+        link_context: AccountAddress,
         loader: &Loader,
     ) -> VMResult<()> {
-        let link_context = data_store.link_context();
         let resolver = function.get_resolver(link_context, loader);
 
         for ty in function.parameter_types() {
@@ -194,6 +190,24 @@ impl ParanoidTypeChecker {
         }
     }
 
+    fn non_native_function(
+        operand_stack: &mut OperandStackInterface,
+        function: &Function,
+        ty_args: &[Type],
+        loader: &Loader,
+        link_context: AccountAddress,
+    ) -> PartialVMResult<()> {
+        ParanoidTypeChecker::check_local_types(
+            operand_stack,
+            &function,
+            &ty_args,
+            loader,
+            link_context,
+        )?;
+        ParanoidTypeChecker::get_local_types(&function, &ty_args, link_context, loader)?;
+        Ok(())
+    }
+
     fn check_local_types(
         operand_stack: &mut OperandStackInterface,
         function: &Function,
@@ -237,18 +251,17 @@ impl ParanoidTypeChecker {
         })
     }
 
-    fn push_return_types(
+    fn native_function(
         operand_stack: &mut OperandStackInterface,
         function: &Function,
         ty_args: &[Type],
+        resolver: &Resolver,
     ) -> PartialVMResult<()> {
-        for ty in function.return_types() {
-            operand_stack.push_ty(ty.subst(ty_args)?)?;
-        }
+        ParanoidTypeChecker::check_parameter_types(operand_stack, &function, ty_args, &resolver)?;
+        ParanoidTypeChecker::push_return_types(operand_stack, &function, &ty_args)?;
         Ok(())
     }
 
-    /// Pop from operand stack and validate types
     fn check_parameter_types(
         operand_stack: &mut OperandStackInterface,
         function: &Function,
@@ -261,6 +274,17 @@ impl ParanoidTypeChecker {
                 resolver.subst(&function.parameter_types()[expected_args - i - 1], ty_args)?;
             let ty = operand_stack.pop_ty()?;
             ty.check_eq(&expected_ty)?;
+        }
+        Ok(())
+    }
+
+    fn push_return_types(
+        operand_stack: &mut OperandStackInterface,
+        function: &Function,
+        ty_args: &[Type],
+    ) -> PartialVMResult<()> {
+        for ty in function.return_types() {
+            operand_stack.push_ty(ty.subst(ty_args)?)?;
         }
         Ok(())
     }

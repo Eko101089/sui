@@ -151,7 +151,7 @@ impl Interpreter {
             &mut operand_stack,
             function,
             ty_args,
-            data_store,
+            data_store.link_context(),
             loader,
         )?;
 
@@ -174,7 +174,7 @@ impl Interpreter {
             &mut operand_stack,
             function,
             ty_args,
-            data_store,
+            data_store.link_context(),
             loader,
             current_frame,
         )?;
