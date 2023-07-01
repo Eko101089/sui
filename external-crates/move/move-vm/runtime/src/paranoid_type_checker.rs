@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use move_binary_format::errors::Location;
 use std::sync::Arc;
 
 use move_binary_format::{
@@ -85,8 +86,8 @@ impl ParanoidTypeChecker {
                 loader,
                 link_context,
             )
-            .map_err(|e| self.set_location(e))
-            .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
+            .map_err(|e| self.set_location(e)) // interpreter expose this
+            .map_err(|err| self.maybe_core_dump(err, &current_frame))?; // interpreter expose this
         }
         Ok(())
     }
