@@ -697,6 +697,8 @@ pub struct ProtocolConfig {
 
     /// === Execution Version ===
     execution_version: Option<u64>,
+
+    upgraded_multisig: Option<u64>,
 }
 
 // feature flags
@@ -797,6 +799,10 @@ impl ProtocolConfig {
 
     pub fn simplified_unwrap_then_delete(&self) -> bool {
         self.feature_flags.simplified_unwrap_then_delete
+    }
+
+    pub fn supports_upgraded_multisig(&self) -> bool {
+        self.upgraded_multisig.is_some()
     }
 }
 
@@ -1150,7 +1156,7 @@ impl ProtocolConfig {
                 gas_rounding_step: None,
 
                 execution_version: None,
-
+                upgraded_multisig: None
                 // When adding a new constant, set it to None in the earliest version, like this:
                 // new_constant: None,
             },
@@ -1278,6 +1284,11 @@ impl ProtocolConfig {
                 // cfg.feature_flags.loaded_child_objects_fixed = true;
                 // cfg.feature_flags.ban_entry_init = true;
                 // cfg.feature_flags.pack_digest_hash_modules = true;
+                cfg
+            }
+            18 => {
+                let mut cfg = Self::get_for_version_impl(version - 1, chain);
+                cfg.upgraded_multisig = Some(1);
                 cfg
             }
             // Use this template when making changes:

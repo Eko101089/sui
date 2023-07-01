@@ -1,8 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::str::FromStr;
-
 use super::{MultiSigPublicKey, ThresholdUnit, WeightUnit};
 use crate::{
     base_types::SuiAddress,
@@ -24,6 +22,7 @@ use once_cell::sync::OnceCell;
 use rand::{rngs::StdRng, SeedableRng};
 use roaring::RoaringBitmap;
 use shared_crypto::intent::{Intent, IntentMessage, PersonalMessage};
+use std::str::FromStr;
 
 pub fn keys() -> Vec<SuiKeyPair> {
     let mut seed = StdRng::from_seed([0; 32]);

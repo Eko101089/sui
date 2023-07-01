@@ -1689,6 +1689,12 @@ impl SenderSignedData {
         self.tx_signatures().iter().any(|sig| sig.is_zklogin())
     }
 
+    pub fn has_upgraded_multisig(&self) -> bool {
+        self.tx_signatures()
+            .iter()
+            .any(|sig| sig.is_upgraded_multisig())
+    }
+
     #[cfg(test)]
     pub fn intent_message_mut_for_testing(&mut self) -> &mut IntentMessage<TransactionData> {
         &mut self.inner_mut().intent_message
